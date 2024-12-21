@@ -57,6 +57,11 @@ type ProfileUpdate struct {
 	FavoriteMenus []string `json:"favoriteMenus"`
 }
 
+// 채팅 관련 구조체 추가
+type ChatMessage struct {
+	Content string `json:"content" binding:"required"`
+}
+
 func main() {
 	// 데이터베이스 연결
 	dbUser := os.Getenv("DB_USER")
@@ -106,6 +111,9 @@ func main() {
 		api.POST("/schedules", createSchedule)
 		api.PUT("/profile", updateProfile)
 		api.GET("/profile", getProfile)
+		api.GET("/chats", getChatUsers)
+		api.GET("/chats/:userId/messages", getChatMessages)
+		api.POST("/chats/:userId/messages", sendMessage)
 	}
 
 	port := os.Getenv("PORT")
@@ -169,6 +177,42 @@ func initDB() {
     `)
 	if err != nil {
 		log.Fatal("Failed to create schedules table:", err)
+	}
+
+	// 채팅방 테이블
+	_, err = db.Exec(`
+        CREATE TABLE IF NOT EXISTS chat_rooms (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            user1_id INT NOT NULL,
+            user2_id INT NOT NULL,
+            last_message TEXT,
+            last_update_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user1_id) REFERENCES users(id),
+            FOREIGN KEY (user2_id) REFERENCES users(id),
+            UNIQUE KEY unique_users (user1_id, user2_id)
+        )
+    `)
+	if err != nil {
+		log.Fatal("Failed to create chat_rooms table:", err)
+	}
+
+	// 채팅 메시지 테이블
+	_, err = db.Exec(`
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            room_id INT NOT NULL,
+            sender_id INT NOT NULL,
+            content TEXT NOT NULL,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (room_id) REFERENCES chat_rooms(id),
+            FOREIGN KEY (sender_id) REFERENCES users(id),
+            INDEX idx_room_id (room_id),
+            INDEX idx_created_at (created_at)
+        )
+    `)
+	if err != nil {
+		log.Fatal("Failed to create chat_messages table:", err)
 	}
 }
 
@@ -651,4 +695,199 @@ func getProfile(c *gin.Context) {
 		"introduction": profile.Introduction,
 		"mealHistory":  mealHistory,
 	})
+}
+
+func getChatUsers(c *gin.Context) {
+	currentUserID, _ := c.Get("userID")
+
+	rows, err := db.Query(`
+        SELECT 
+            u.id, 
+            u.nickname
+        FROM users u
+        WHERE u.id != ?
+        ORDER BY u.nickname`,
+		currentUserID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching users"})
+		return
+	}
+	defer rows.Close()
+
+	var users []gin.H
+	for rows.Next() {
+		var user struct {
+			ID       int
+			Nickname string
+		}
+
+		if err := rows.Scan(&user.ID, &user.Nickname); err != nil {
+			continue
+		}
+
+		users = append(users, gin.H{
+			"id":       user.ID,
+			"nickname": user.Nickname,
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users": users})
+}
+
+func getChatMessages(c *gin.Context) {
+	currentUserID, _ := c.Get("userID")
+	otherUserID, err := strconv.Atoi(c.Param("userId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	lastMsgID, _ := strconv.Atoi(c.DefaultQuery("lastMessageId", "0"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "20"))
+
+	query := `
+        SELECT m.id, m.sender_id, m.content, m.created_at
+        FROM chat_messages m
+        JOIN chat_rooms r ON m.room_id = r.id
+        WHERE (r.user1_id = ? AND r.user2_id = ?) OR (r.user1_id = ? AND r.user2_id = ?)
+    `
+	args := []interface{}{currentUserID, otherUserID, otherUserID, currentUserID}
+
+	if lastMsgID > 0 {
+		query += " AND m.id < ?"
+		args = append(args, lastMsgID)
+	}
+
+	query += " ORDER BY m.created_at DESC LIMIT ?"
+	args = append(args, limit+1)
+
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching messages"})
+		return
+	}
+	defer rows.Close()
+
+	var messages []gin.H
+	for rows.Next() {
+		var msg struct {
+			ID        int
+			SenderID  int
+			Content   string
+			CreatedAt time.Time
+		}
+
+		if err := rows.Scan(&msg.ID, &msg.SenderID, &msg.Content, &msg.CreatedAt); err != nil {
+			continue
+		}
+
+		if len(messages) < limit {
+			messages = append(messages, gin.H{
+				"id":        msg.ID,
+				"senderId":  msg.SenderID,
+				"content":   msg.Content,
+				"createdAt": msg.CreatedAt,
+			})
+		}
+	}
+
+	hasMore := len(messages) > limit
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages": messages[:min(len(messages), limit)],
+		"hasMore":  hasMore,
+	})
+}
+
+func sendMessage(c *gin.Context) {
+	currentUserID, _ := c.Get("userID")
+	otherUserID, err := strconv.Atoi(c.Param("userId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	var message ChatMessage
+	if err := c.ShouldBindJSON(&message); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 트랜잭션 시작
+	tx, err := db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Transaction error"})
+		return
+	}
+	defer tx.Rollback()
+
+	// 채팅방 찾기 또는 생성
+	var roomID int
+	err = tx.QueryRow(`
+        SELECT id FROM chat_rooms 
+        WHERE (user1_id = ? AND user2_id = ?) OR (user1_id = ? AND user2_id = ?)`,
+		currentUserID, otherUserID, otherUserID, currentUserID,
+	).Scan(&roomID)
+
+	if err == sql.ErrNoRows {
+		// 채팅방이 없으면 새로 생성
+		result, err := tx.Exec(
+			"INSERT INTO chat_rooms (user1_id, user2_id) VALUES (?, ?)",
+			currentUserID, otherUserID,
+		)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating chat room"})
+			return
+		}
+		lastInsertId, err := result.LastInsertId()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Error retrieving last insert ID"})
+			return
+		}
+		roomID = int(lastInsertId)
+	} else if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	// 메시지 저장
+	result, err := tx.Exec(
+		"INSERT INTO chat_messages (room_id, sender_id, content) VALUES (?, ?, ?)",
+		roomID, currentUserID, message.Content,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error sending message"})
+		return
+	}
+
+	// 채팅방 업데이트
+	_, err = tx.Exec(
+		"UPDATE chat_rooms SET last_message = ?, last_update_at = CURRENT_TIMESTAMP WHERE id = ?",
+		message.Content, roomID,
+	)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating chat room"})
+		return
+	}
+
+	// 트랜잭션 커밋
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error committing transaction"})
+		return
+	}
+
+	messageID, _ := result.LastInsertId()
+	c.JSON(http.StatusCreated, gin.H{
+		"id":        messageID,
+		"content":   message.Content,
+		"createdAt": time.Now(),
+	})
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
