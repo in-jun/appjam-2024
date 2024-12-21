@@ -44,11 +44,11 @@ type Post struct {
 }
 
 type ScheduleRequest struct {
-	Date      string `json:"date" binding:"required"`
-	MealTime  string `json:"mealTime" binding:"required"`
-	Location  string `json:"location" binding:"required"`
-	Companion string `json:"companion" binding:"required"`
-	MenuName  string `json:"menuName" binding:"required"`
+	Date     string `json:"date" binding:"required"`
+	MealTime string `json:"mealTime" binding:"required"`
+	Location string `json:"location" binding:"required"`
+	Content  string `json:"content" binding:"required"`
+	MenuName string `json:"menuName" binding:"required"`
 }
 
 type ProfileUpdate struct {
@@ -160,7 +160,7 @@ func initDB() {
             date DATE NOT NULL,
             meal_time VARCHAR(50) NOT NULL,
             location VARCHAR(255) NOT NULL,
-            companion VARCHAR(255) NOT NULL,
+            content VARCHAR(255) NOT NULL,
             menu_name VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id),
@@ -441,7 +441,7 @@ func getSchedules(c *gin.Context) {
 	}
 
 	rows, err := db.Query(`
-        SELECT id, date, meal_time, location, companion, menu_name
+        SELECT id, date, meal_time, location, content, menu_name
         FROM schedules
         WHERE user_id = ?
         AND YEAR(date) = ?
@@ -458,28 +458,28 @@ func getSchedules(c *gin.Context) {
 	var schedules []gin.H
 	for rows.Next() {
 		var schedule struct {
-			ID        int
-			Date      string
-			MealTime  string
-			Location  string
-			Companion string
-			MenuName  string
+			ID       int
+			Date     string
+			MealTime string
+			Location string
+			Content  string
+			MenuName string
 		}
 
 		if err := rows.Scan(
 			&schedule.ID, &schedule.Date, &schedule.MealTime,
-			&schedule.Location, &schedule.Companion, &schedule.MenuName,
+			&schedule.Location, &schedule.Content, &schedule.MenuName,
 		); err != nil {
 			continue
 		}
 
 		schedules = append(schedules, gin.H{
-			"id":        schedule.ID,
-			"date":      schedule.Date,
-			"mealTime":  schedule.MealTime,
-			"location":  schedule.Location,
-			"companion": schedule.Companion,
-			"menuName":  schedule.MenuName,
+			"id":       schedule.ID,
+			"date":     schedule.Date,
+			"mealTime": schedule.MealTime,
+			"location": schedule.Location,
+			"content":  schedule.Content,
+			"menuName": schedule.MenuName,
 		})
 	}
 
@@ -540,13 +540,13 @@ func createSchedule(c *gin.Context) {
 
 	// 일정 추가
 	result, err := db.Exec(`
-        INSERT INTO schedules (user_id, date, meal_time, location, companion, menu_name)
+        INSERT INTO schedules (user_id, date, meal_time, location, content, menu_name)
         VALUES (?, ?, ?, ?, ?, ?)`,
 		userID,
 		schedule.Date,
 		schedule.MealTime,
 		schedule.Location,
-		schedule.Companion,
+		schedule.Content,
 		schedule.MenuName,
 	)
 
@@ -613,7 +613,7 @@ func getProfile(c *gin.Context) {
 	}
 
 	rows, err := db.Query(`
-        SELECT date, companion, menu_name 
+        SELECT date, content, menu_name 
         FROM schedules 
         WHERE user_id = ? 
         ORDER BY date DESC 
@@ -629,19 +629,19 @@ func getProfile(c *gin.Context) {
 	var mealHistory []gin.H
 	for rows.Next() {
 		var meal struct {
-			Date      string
-			Companion string
-			MenuName  string
+			Date     string
+			Content  string
+			MenuName string
 		}
 
-		if err := rows.Scan(&meal.Date, &meal.Companion, &meal.MenuName); err != nil {
+		if err := rows.Scan(&meal.Date, &meal.Content, &meal.MenuName); err != nil {
 			continue
 		}
 
 		mealHistory = append(mealHistory, gin.H{
-			"date":      meal.Date,
-			"companion": meal.Companion,
-			"menuName":  meal.MenuName,
+			"date":     meal.Date,
+			"content":  meal.Content,
+			"menuName": meal.MenuName,
 		})
 	}
 
