@@ -22,33 +22,39 @@ var jwtKey = []byte(os.Getenv("JWT_SECRET_KEY"))
 // 구조체 정의
 type User struct {
 	ID        int    `json:"id"`
-	Email     string `json:"email" binding:"required"`
-	Password  string `json:"password" binding:"required"`
+	Email     string `json:"email" binding:"required,email"`
+	Password  string `json:"password" binding:"required,min=8"`
 	Nickname  string `json:"nickname" binding:"required"`
 	BirthDate string `json:"birthDate" binding:"required"`
 }
 
 type LoginRequest struct {
-	Email    string `json:"email" binding:"required"`
+	Email    string `json:"email" binding:"required,email"`
 	Password string `json:"password" binding:"required"`
 }
 
 type Post struct {
-	Title           string `json:"title" binding:"required"`
-	Content         string `json:"content" binding:"required"`
+	Title           string `json:"title" binding:"required,max=100"`
+	Content         string `json:"content" binding:"required,max=500"`
 	MealTime        string `json:"mealTime" binding:"required"`
 	Location        string `json:"location" binding:"required"`
 	MenuName        string `json:"menuName" binding:"required"`
-	PreferredAge    int    `json:"preferredAge"`
-	PreferredGender string `json:"preferredGender"`
+	PreferredAge    int    `json:"preferredAge" binding:"omitempty,min=0,max=100"`
+	PreferredGender string `json:"preferredGender" binding:"omitempty"`
 }
 
 type ScheduleRequest struct {
-	Date      string `json:"date" binding:"required"`     // YYYY-MM-DD
-	MealTime  string `json:"mealTime" binding:"required"` // "아침" | "점심" | "저녁"
+	Date      string `json:"date" binding:"required"`
+	MealTime  string `json:"mealTime" binding:"required"`
 	Location  string `json:"location" binding:"required"`
-	Companion string `json:"companion" binding:"required"` // 동행자
+	Companion string `json:"companion" binding:"required"`
 	MenuName  string `json:"menuName" binding:"required"`
+}
+
+type ProfileUpdate struct {
+	Nickname      string   `json:"nickname" binding:"required"`
+	Introduction  string   `json:"introduction" binding:"max=100"`
+	FavoriteMenus []string `json:"favoriteMenus"`
 }
 
 func main() {
@@ -94,15 +100,10 @@ func main() {
 	api := r.Group("/api/v1")
 	api.Use(authMiddleware())
 	{
-		// 게시글 관련
 		api.POST("/posts", createPost)
 		api.GET("/posts", getPosts)
-
-		// 일정 관련
 		api.GET("/schedules", getSchedules)
 		api.POST("/schedules", createSchedule)
-
-		// 프로필 관련
 		api.PUT("/profile", updateProfile)
 		api.GET("/profile", getProfile)
 	}
@@ -114,7 +115,6 @@ func main() {
 	r.Run(":" + port)
 }
 
-// 데이터베이스 초기화
 func initDB() {
 	// users 테이블
 	_, err := db.Exec(`
@@ -163,7 +163,8 @@ func initDB() {
             companion VARCHAR(255) NOT NULL,
             menu_name VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (user_id) REFERENCES users(id)
+            FOREIGN KEY (user_id) REFERENCES users(id),
+            UNIQUE KEY unique_schedule (user_id, date, meal_time)
         )
     `)
 	if err != nil {
@@ -171,7 +172,6 @@ func initDB() {
 	}
 }
 
-// 미들웨어
 func corsMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
@@ -196,7 +196,7 @@ func authMiddleware() gin.HandlerFunc {
 		}
 
 		bearerToken := strings.Split(authHeader, " ")
-		if len(bearerToken) != 2 {
+		if len(bearerToken) != 2 || bearerToken[0] != "Bearer" {
 			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token format"})
 			return
 		}
@@ -217,7 +217,6 @@ func authMiddleware() gin.HandlerFunc {
 	}
 }
 
-// 핸들러 함수들
 func handleSignup(c *gin.Context) {
 	var user User
 	if err := c.ShouldBindJSON(&user); err != nil {
@@ -225,12 +224,26 @@ func handleSignup(c *gin.Context) {
 		return
 	}
 
+	// 이메일 중복 검사
+	var count int
+	err := db.QueryRow("SELECT COUNT(*) FROM users WHERE email = ?", user.Email).Scan(&count)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+	if count > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email already exists"})
+		return
+	}
+
+	// 비밀번호 해싱
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error hashing password"})
 		return
 	}
 
+	// 사용자 저장
 	result, err := db.Exec(
 		"INSERT INTO users (email, password, nickname, birth_date) VALUES (?, ?, ?, ?)",
 		user.Email, hashedPassword, user.Nickname, user.BirthDate,
@@ -270,6 +283,7 @@ func handleLogin(c *gin.Context) {
 		return
 	}
 
+	// JWT 토큰 생성
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"userId": user.ID,
 		"exp":    time.Now().Add(time.Hour * 24).Unix(),
@@ -297,6 +311,13 @@ func createPost(c *gin.Context) {
 	var post Post
 	if err := c.ShouldBindJSON(&post); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 식사 시간 검증
+	validMealTimes := map[string]bool{"아침": true, "점심": true, "저녁": true}
+	if !validMealTimes[post.MealTime] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid meal time. Use '아침', '점심', or '저녁'"})
 		return
 	}
 
@@ -394,7 +415,8 @@ func getPosts(c *gin.Context) {
 	var total int
 	countQuery := "SELECT COUNT(*) FROM posts"
 	if mealTime != "" {
-		db.QueryRow(countQuery+" WHERE meal_time = ?", mealTime).Scan(&total)
+		countQuery += " WHERE meal_time = ?"
+		db.QueryRow(countQuery, mealTime).Scan(&total)
 	} else {
 		db.QueryRow(countQuery).Scan(&total)
 	}
@@ -412,6 +434,11 @@ func getSchedules(c *gin.Context) {
 	userID, _ := c.Get("userID")
 	year, _ := strconv.Atoi(c.Query("year"))
 	month, _ := strconv.Atoi(c.Query("month"))
+
+	if year == 0 || month == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Year and month are required"})
+		return
+	}
 
 	rows, err := db.Query(`
         SELECT id, date, meal_time, location, companion, menu_name
@@ -471,18 +498,47 @@ func createSchedule(c *gin.Context) {
 	}
 
 	// 날짜 형식 검증
-	_, err := time.Parse("2006-01-02", schedule.Date)
+	scheduleDate, err := time.Parse("2006-01-02", schedule.Date)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Use YYYY-MM-DD"})
 		return
 	}
 
+	// 과거 날짜 검증
+	if scheduleDate.Before(time.Now().Truncate(24 * time.Hour)) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot create schedule for past dates"})
+		return
+	}
+
 	// 식사 시간 검증
-	if schedule.MealTime != "아침" && schedule.MealTime != "점심" && schedule.MealTime != "저녁" {
+	validMealTimes := map[string]bool{"아침": true, "점심": true, "저녁": true}
+	if !validMealTimes[schedule.MealTime] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid meal time. Use '아침', '점심', or '저녁'"})
 		return
 	}
 
+	// 중복 일정 검사
+	var count int
+	err = db.QueryRow(`
+        SELECT COUNT(*) 
+        FROM schedules 
+        WHERE user_id = ? 
+        AND date = ? 
+        AND meal_time = ?`,
+		userID, schedule.Date, schedule.MealTime,
+	).Scan(&count)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database error"})
+		return
+	}
+
+	if count > 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Schedule already exists for this time"})
+		return
+	}
+
+	// 일정 추가
 	result, err := db.Exec(`
         INSERT INTO schedules (user_id, date, meal_time, location, companion, menu_name)
         VALUES (?, ?, ?, ?, ?, ?)`,
@@ -509,14 +565,14 @@ func createSchedule(c *gin.Context) {
 func updateProfile(c *gin.Context) {
 	userID, _ := c.Get("userID")
 
-	var profile struct {
-		Nickname      string   `json:"nickname" binding:"required"`
-		Introduction  string   `json:"introduction"`
-		FavoriteMenus []string `json:"favoriteMenus"`
-	}
-
+	var profile ProfileUpdate
 	if err := c.ShouldBindJSON(&profile); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(profile.Introduction) > 100 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Introduction cannot exceed 100 characters"})
 		return
 	}
 
