@@ -2,7 +2,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -11,49 +10,57 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang-jwt/jwt"
-	"github.com/gorilla/mux"
 	"golang.org/x/crypto/bcrypt"
 )
-
-// 구조체 정의
-type User struct {
-	ID        int       `json:"id"`
-	Email     string    `json:"email"`
-	Password  string    `json:"password,omitempty"`
-	Nickname  string    `json:"nickname"`
-	BirthDate string    `json:"birthDate"`
-	CreatedAt time.Time `json:"createdAt"`
-}
-
-type Post struct {
-	ID              int       `json:"id"`
-	Title           string    `json:"title"`
-	Content         string    `json:"content"`
-	MealTime        string    `json:"mealTime"`
-	Location        string    `json:"location"`
-	MenuName        string    `json:"menuName"`
-	PreferredAge    int       `json:"preferredAge"`
-	PreferredGender string    `json:"preferredGender"`
-	AuthorID        int       `json:"authorId"`
-	CreatedAt       time.Time `json:"createdAt"`
-}
 
 var db *sql.DB
 var jwtKey = []byte(os.Getenv("JWT_SECRET_KEY"))
 
+// 구조체 정의
+type User struct {
+	ID        int    `json:"id"`
+	Email     string `json:"email" binding:"required"`
+	Password  string `json:"password" binding:"required"`
+	Nickname  string `json:"nickname" binding:"required"`
+	BirthDate string `json:"birthDate" binding:"required"`
+}
+
+type LoginRequest struct {
+	Email    string `json:"email" binding:"required"`
+	Password string `json:"password" binding:"required"`
+}
+
+type Post struct {
+	Title           string `json:"title" binding:"required"`
+	Content         string `json:"content" binding:"required"`
+	MealTime        string `json:"mealTime" binding:"required"`
+	Location        string `json:"location" binding:"required"`
+	MenuName        string `json:"menuName" binding:"required"`
+	PreferredAge    int    `json:"preferredAge"`
+	PreferredGender string `json:"preferredGender"`
+}
+
+type ScheduleRequest struct {
+	Date      string `json:"date" binding:"required"`     // YYYY-MM-DD
+	MealTime  string `json:"mealTime" binding:"required"` // "아침" | "점심" | "저녁"
+	Location  string `json:"location" binding:"required"`
+	Companion string `json:"companion" binding:"required"` // 동행자
+	MenuName  string `json:"menuName" binding:"required"`
+}
+
 func main() {
+	// 데이터베이스 연결
 	dbUser := os.Getenv("DB_USER")
 	dbPassword := os.Getenv("DB_PASSWORD")
 	dbHost := os.Getenv("DB_HOST")
 	dbName := os.Getenv("DB_NAME")
 
-	// MySQL DSN 구성
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/%s?charset=utf8mb4&parseTime=True&loc=Local",
 		dbUser, dbPassword, dbHost, dbName)
 
-	// DB 연결
 	var err error
 	db, err = sql.Open("mysql", dsn)
 	if err != nil {
@@ -70,41 +77,46 @@ func main() {
 	// 데이터베이스 초기화
 	initDB()
 
-	// 라우터 설정
-	r := mux.NewRouter()
+	// Gin 라우터 설정
+	r := gin.Default()
 
-	// CORS 미들웨어 설정
-	r.Use(corsMiddleware)
-
-	// API 라우트
-	api := r.PathPrefix("/api/v1").Subrouter()
+	// CORS 미들웨어
+	r.Use(corsMiddleware())
 
 	// 공개 라우트
-	api.HandleFunc("/auth/signup", handleSignup).Methods("POST")
-	api.HandleFunc("/auth/login", handleLogin).Methods("POST")
+	auth := r.Group("/api/v1/auth")
+	{
+		auth.POST("/signup", handleSignup)
+		auth.POST("/login", handleLogin)
+	}
 
 	// 보호된 라우트
-	protected := api.PathPrefix("").Subrouter()
-	protected.Use(authMiddleware)
-	protected.HandleFunc("/posts", createPost).Methods("POST")
-	protected.HandleFunc("/posts", getPosts).Methods("GET")
-	protected.HandleFunc("/schedules", getSchedules).Methods("GET")
-	protected.HandleFunc("/profile", updateProfile).Methods("PUT")
-	protected.HandleFunc("/profile", getProfile).Methods("GET")
+	api := r.Group("/api/v1")
+	api.Use(authMiddleware())
+	{
+		// 게시글 관련
+		api.POST("/posts", createPost)
+		api.GET("/posts", getPosts)
 
-	// 서버 시작
+		// 일정 관련
+		api.GET("/schedules", getSchedules)
+		api.POST("/schedules", createSchedule)
+
+		// 프로필 관련
+		api.PUT("/profile", updateProfile)
+		api.GET("/profile", getProfile)
+	}
+
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
 	}
-
-	log.Printf("Server starting on port %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	r.Run(":" + port)
 }
 
 // 데이터베이스 초기화
 func initDB() {
-	// users 테이블 생성
+	// users 테이블
 	_, err := db.Exec(`
         CREATE TABLE IF NOT EXISTS users (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -120,7 +132,7 @@ func initDB() {
 		log.Fatal("Failed to create users table:", err)
 	}
 
-	// posts 테이블 생성
+	// posts 테이블
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS posts (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -140,7 +152,7 @@ func initDB() {
 		log.Fatal("Failed to create posts table:", err)
 	}
 
-	// schedules 테이블 생성
+	// schedules 테이블
 	_, err = db.Exec(`
         CREATE TABLE IF NOT EXISTS schedules (
             id INT AUTO_INCREMENT PRIMARY KEY,
@@ -148,7 +160,7 @@ func initDB() {
             date DATE NOT NULL,
             meal_time VARCHAR(50) NOT NULL,
             location VARCHAR(255) NOT NULL,
-            companion VARCHAR(255),
+            companion VARCHAR(255) NOT NULL,
             menu_name VARCHAR(255) NOT NULL,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (user_id) REFERENCES users(id)
@@ -159,33 +171,33 @@ func initDB() {
 	}
 }
 
-// 미들웨어 함수들
-func corsMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+// 미들웨어
+func corsMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
 
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(http.StatusOK)
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusOK)
 			return
 		}
 
-		next.ServeHTTP(w, r)
-	})
+		c.Next()
+	}
 }
 
-func authMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authHeader := r.Header.Get("Authorization")
+func authMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			http.Error(w, "Authorization header required", http.StatusUnauthorized)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Authorization header required"})
 			return
 		}
 
 		bearerToken := strings.Split(authHeader, " ")
 		if len(bearerToken) != 2 {
-			http.Error(w, "Invalid token format", http.StatusUnauthorized)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token format"})
 			return
 		}
 
@@ -195,77 +207,69 @@ func authMiddleware(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Invalid token"})
 			return
 		}
 
 		userID := int(claims["userId"].(float64))
-		r.Header.Set("UserID", strconv.Itoa(userID))
-		next.ServeHTTP(w, r)
-	})
+		c.Set("userID", userID)
+		c.Next()
+	}
 }
 
 // 핸들러 함수들
-func handleSignup(w http.ResponseWriter, r *http.Request) {
+func handleSignup(c *gin.Context) {
 	var user User
-	if err := json.NewDecoder(r.Body).Decode(&user); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := c.ShouldBindJSON(&user); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 비밀번호 해싱
 	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(user.Password), bcrypt.DefaultCost)
 	if err != nil {
-		http.Error(w, "Error hashing password", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error hashing password"})
 		return
 	}
 
-	// 사용자 저장
 	result, err := db.Exec(
 		"INSERT INTO users (email, password, nickname, birth_date) VALUES (?, ?, ?, ?)",
 		user.Email, hashedPassword, user.Nickname, user.BirthDate,
 	)
 	if err != nil {
-		http.Error(w, "Error creating user", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating user"})
 		return
 	}
 
 	id, _ := result.LastInsertId()
-	user.ID = int(id)
-
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	c.JSON(http.StatusCreated, gin.H{
 		"message": "User created successfully",
-		"userId":  user.ID,
+		"userId":  id,
 	})
 }
 
-func handleLogin(w http.ResponseWriter, r *http.Request) {
-	var credentials struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-
-	if err := json.NewDecoder(r.Body).Decode(&credentials); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+func handleLogin(c *gin.Context) {
+	var login LoginRequest
+	if err := c.ShouldBindJSON(&login); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	var user User
-	err := db.QueryRow("SELECT id, email, password, nickname, birth_date FROM users WHERE email = ?",
-		credentials.Email).Scan(&user.ID, &user.Email, &user.Password, &user.Nickname, &user.BirthDate)
+	err := db.QueryRow(
+		"SELECT id, email, password, nickname, birth_date FROM users WHERE email = ?",
+		login.Email,
+	).Scan(&user.ID, &user.Email, &user.Password, &user.Nickname, &user.BirthDate)
 
 	if err != nil {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
-	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(credentials.Password)); err != nil {
-		http.Error(w, "Invalid credentials", http.StatusUnauthorized)
+	if err := bcrypt.CompareHashAndPassword([]byte(user.Password), []byte(login.Password)); err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
-	// JWT 토큰 생성
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"userId": user.ID,
 		"exp":    time.Now().Add(time.Hour * 24).Unix(),
@@ -273,13 +277,13 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	tokenString, err := token.SignedString(jwtKey)
 	if err != nil {
-		http.Error(w, "Error creating token", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating token"})
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"token": tokenString,
-		"user": map[string]interface{}{
+		"user": gin.H{
 			"id":        user.ID,
 			"nickname":  user.Nickname,
 			"birthDate": user.BirthDate,
@@ -287,39 +291,38 @@ func handleLogin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func createPost(w http.ResponseWriter, r *http.Request) {
-	userID, _ := strconv.Atoi(r.Header.Get("UserID"))
+func createPost(c *gin.Context) {
+	userID, _ := c.Get("userID")
 
 	var post Post
-	if err := json.NewDecoder(r.Body).Decode(&post); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := c.ShouldBindJSON(&post); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
 	result, err := db.Exec(
 		`INSERT INTO posts (title, content, meal_time, location, menu_name, 
-        preferred_age, preferred_gender, author_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            preferred_age, preferred_gender, author_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		post.Title, post.Content, post.MealTime, post.Location, post.MenuName,
 		post.PreferredAge, post.PreferredGender, userID,
 	)
 
 	if err != nil {
-		http.Error(w, "Error creating post", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating post"})
 		return
 	}
 
 	id, _ := result.LastInsertId()
-	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	c.JSON(http.StatusCreated, gin.H{
 		"message": "Post created successfully",
 		"postId":  id,
 	})
 }
 
-func getPosts(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	size, _ := strconv.Atoi(r.URL.Query().Get("size"))
-	mealTime := r.URL.Query().Get("mealTime")
+func getPosts(c *gin.Context) {
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	size, _ := strconv.Atoi(c.DefaultQuery("size", "10"))
+	mealTime := c.Query("mealTime")
 
 	if page < 1 {
 		page = 1
@@ -330,7 +333,6 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 
 	offset := (page - 1) * size
 
-	// 기본 쿼리
 	query := `
         SELECT p.id, p.title, p.meal_time, p.location, p.menu_name,
                u.nickname, TIMESTAMPDIFF(YEAR, u.birth_date, CURDATE()) as age,
@@ -339,12 +341,9 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
         JOIN users u ON p.author_id = u.id
     `
 
-	countQuery := "SELECT COUNT(*) FROM posts"
-
 	args := make([]interface{}, 0)
 	if mealTime != "" {
 		query += " WHERE p.meal_time = ?"
-		countQuery += " WHERE meal_time = ?"
 		args = append(args, mealTime)
 	}
 
@@ -353,12 +352,12 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := db.Query(query, args...)
 	if err != nil {
-		http.Error(w, "Error querying posts", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error querying posts"})
 		return
 	}
 	defer rows.Close()
 
-	var posts []map[string]interface{}
+	var posts []gin.H
 	for rows.Next() {
 		var post struct {
 			ID        int
@@ -378,13 +377,13 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		posts = append(posts, map[string]interface{}{
+		posts = append(posts, gin.H{
 			"id":       post.ID,
 			"title":    post.Title,
 			"mealTime": post.MealTime,
 			"location": post.Location,
 			"menuName": post.MenuName,
-			"author": map[string]interface{}{
+			"author": gin.H{
 				"nickname": post.Nickname,
 				"age":      post.Age,
 			},
@@ -392,45 +391,44 @@ func getPosts(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	// 전체 페이지 수 계산
 	var total int
+	countQuery := "SELECT COUNT(*) FROM posts"
 	if mealTime != "" {
-		db.QueryRow(countQuery, mealTime).Scan(&total)
+		db.QueryRow(countQuery+" WHERE meal_time = ?", mealTime).Scan(&total)
 	} else {
 		db.QueryRow(countQuery).Scan(&total)
 	}
 
 	totalPages := (total + size - 1) / size
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"posts":       posts,
 		"totalPages":  totalPages,
 		"currentPage": page,
 	})
 }
 
-func getSchedules(w http.ResponseWriter, r *http.Request) {
-	userID, _ := strconv.Atoi(r.Header.Get("UserID"))
-	year, _ := strconv.Atoi(r.URL.Query().Get("year"))
-	month, _ := strconv.Atoi(r.URL.Query().Get("month"))
+func getSchedules(c *gin.Context) {
+	userID, _ := c.Get("userID")
+	year, _ := strconv.Atoi(c.Query("year"))
+	month, _ := strconv.Atoi(c.Query("month"))
 
-	query := `
+	rows, err := db.Query(`
         SELECT id, date, meal_time, location, companion, menu_name
         FROM schedules
         WHERE user_id = ?
         AND YEAR(date) = ?
         AND MONTH(date) = ?
-        ORDER BY date
-    `
-
-	rows, err := db.Query(query, userID, year, month)
+        ORDER BY date`,
+		userID, year, month,
+	)
 	if err != nil {
-		http.Error(w, "Error querying schedules", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error querying schedules"})
 		return
 	}
 	defer rows.Close()
 
-	var schedules []map[string]interface{}
+	var schedules []gin.H
 	for rows.Next() {
 		var schedule struct {
 			ID        int
@@ -448,7 +446,7 @@ func getSchedules(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		schedules = append(schedules, map[string]interface{}{
+		schedules = append(schedules, gin.H{
 			"id":        schedule.ID,
 			"date":      schedule.Date,
 			"mealTime":  schedule.MealTime,
@@ -458,50 +456,94 @@ func getSchedules(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"schedules": schedules,
 	})
 }
 
-func updateProfile(w http.ResponseWriter, r *http.Request) {
-	userID, _ := strconv.Atoi(r.Header.Get("UserID"))
+func createSchedule(c *gin.Context) {
+	userID, _ := c.Get("userID")
+
+	var schedule ScheduleRequest
+	if err := c.ShouldBindJSON(&schedule); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// 날짜 형식 검증
+	_, err := time.Parse("2006-01-02", schedule.Date)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid date format. Use YYYY-MM-DD"})
+		return
+	}
+
+	// 식사 시간 검증
+	if schedule.MealTime != "아침" && schedule.MealTime != "점심" && schedule.MealTime != "저녁" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid meal time. Use '아침', '점심', or '저녁'"})
+		return
+	}
+
+	result, err := db.Exec(`
+        INSERT INTO schedules (user_id, date, meal_time, location, companion, menu_name)
+        VALUES (?, ?, ?, ?, ?, ?)`,
+		userID,
+		schedule.Date,
+		schedule.MealTime,
+		schedule.Location,
+		schedule.Companion,
+		schedule.MenuName,
+	)
+
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error creating schedule"})
+		return
+	}
+
+	id, _ := result.LastInsertId()
+	c.JSON(http.StatusCreated, gin.H{
+		"message":    "Schedule created successfully",
+		"scheduleId": id,
+	})
+}
+
+func updateProfile(c *gin.Context) {
+	userID, _ := c.Get("userID")
 
 	var profile struct {
-		Nickname      string   `json:"nickname"`
+		Nickname      string   `json:"nickname" binding:"required"`
 		Introduction  string   `json:"introduction"`
 		FavoriteMenus []string `json:"favoriteMenus"`
 	}
 
-	if err := json.NewDecoder(r.Body).Decode(&profile); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+	if err := c.ShouldBindJSON(&profile); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// 프로필 업데이트
 	_, err := db.Exec(
 		"UPDATE users SET nickname = ?, introduction = ? WHERE id = ?",
-		profile.Nickname, profile.Introduction, userID,
+		profile.Nickname,
+		profile.Introduction,
+		userID,
 	)
 
 	if err != nil {
-		http.Error(w, "Error updating profile", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error updating profile"})
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{
+	c.JSON(http.StatusOK, gin.H{
 		"message": "Profile updated successfully",
 	})
 }
 
-func getProfile(w http.ResponseWriter, r *http.Request) {
-	userID, _ := strconv.Atoi(r.Header.Get("UserID"))
+func getProfile(c *gin.Context) {
+	userID, _ := c.Get("userID")
 
-	// 사용자 기본 정보 조회
 	var profile struct {
-		Nickname     string `json:"nickname"`
-		BirthDate    string `json:"birthDate"`
-		Introduction string `json:"introduction"`
+		Nickname     string
+		BirthDate    string
+		Introduction string
 	}
 
 	err := db.QueryRow(
@@ -510,11 +552,10 @@ func getProfile(w http.ResponseWriter, r *http.Request) {
 	).Scan(&profile.Nickname, &profile.BirthDate, &profile.Introduction)
 
 	if err != nil {
-		http.Error(w, "Error fetching profile", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching profile"})
 		return
 	}
 
-	// 식사 기록 조회
 	rows, err := db.Query(`
         SELECT date, companion, menu_name 
         FROM schedules 
@@ -524,12 +565,12 @@ func getProfile(w http.ResponseWriter, r *http.Request) {
 		userID,
 	)
 	if err != nil {
-		http.Error(w, "Error fetching meal history", http.StatusInternalServerError)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error fetching meal history"})
 		return
 	}
 	defer rows.Close()
 
-	var mealHistory []map[string]string
+	var mealHistory []gin.H
 	for rows.Next() {
 		var meal struct {
 			Date      string
@@ -541,20 +582,17 @@ func getProfile(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
-		mealHistory = append(mealHistory, map[string]string{
+		mealHistory = append(mealHistory, gin.H{
 			"date":      meal.Date,
 			"companion": meal.Companion,
 			"menuName":  meal.MenuName,
 		})
 	}
 
-	// 응답 생성
-	response := map[string]interface{}{
+	c.JSON(http.StatusOK, gin.H{
 		"nickname":     profile.Nickname,
 		"birthDate":    profile.BirthDate,
 		"introduction": profile.Introduction,
 		"mealHistory":  mealHistory,
-	}
-
-	json.NewEncoder(w).Encode(response)
+	})
 }
