@@ -41,20 +41,13 @@ type Post struct {
 }
 
 var db *sql.DB
-var jwtKey = []byte("fasdfD*FUdOFEFW#UIFDfH#")
-
-// var jwtKey = []byte(os.Getenv("JWT_SECRET_KEY"))
+var jwtKey = []byte(os.Getenv("JWT_SECRET_KEY"))
 
 func main() {
-	dbUser := "myuser"
-	dbPassword := "mypassword"
-	dbHost := "db"
-	dbName := "mydb"
-
-	// dbUser := os.Getenv("DB_USER")
-	// dbPassword := os.Getenv("DB_PASSWORD")
-	// dbHost := os.Getenv("DB_HOST")
-	// dbName := os.Getenv("DB_NAME")
+	dbUser := os.Getenv("DB_USER")
+	dbPassword := os.Getenv("DB_PASSWORD")
+	dbHost := os.Getenv("DB_HOST")
+	dbName := os.Getenv("DB_NAME")
 
 	// MySQL DSN 구성
 	dsn := fmt.Sprintf("%s:%s@tcp(%s:3306)/%s?charset=utf8mb4&parseTime=True&loc=Local",
